@@ -1,10 +1,12 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { fetchArrivedPeople, fetchNotArrivedPeople } from '../api/people'
+import { useRouter } from 'vue-router'
 
 const totalCount = 130
 const arrived = ref([])
 const notArrived = ref([])
+const router = useRouter()
 
 const filters = ref([
   { key: 1, label: '1号集合点', active: true },
@@ -26,6 +28,10 @@ const arrivedFiltered = computed(() => arrived.value.filter(a => activeGroups.va
 function toggleFilter(key) {
   const item = filters.value.find(f => f.key === key)
   if (item) item.active = !item.active
+}
+
+function gotoTrace(p){
+  router.push({ name:'trace', query:{ id:p.id } })
 }
 
 const statList = computed(() => {
@@ -69,6 +75,7 @@ const statList = computed(() => {
           :key="p.id"
           class="person-card not-arrived"
           :class="{ highlight: p.id % 6 === 0 }"
+          @click="gotoTrace(p)"
         >
           <div class="card-head">{{ p.name }}</div>
           <div class="avatar">
@@ -219,6 +226,7 @@ const statList = computed(() => {
 .person-card .info { color: #6c7a92; font-size: 12px; padding: 0 12px 12px; }
 .person-card.not-arrived.highlight { box-shadow: 0 0 0 2px #2bd46c inset; }
 .person-card.not-arrived.highlight .card-head { background: #d8ffe6; color: #17a24b; }
+.person-card.not-arrived { cursor: pointer; }
 .person-card.arrived { border-color: #1976f2; }
 .person-card.arrived .badge {
   position: absolute; left: 8px; top: 8px; background: #ffdf2e; width: 20px; height: 20px; border-radius: 3px; font-weight: 700; font-size: 12px; display: flex; align-items: center; justify-content: center;
