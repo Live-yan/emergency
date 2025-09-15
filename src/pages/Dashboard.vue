@@ -69,7 +69,6 @@ const statList = computed(() => {
           :key="p.id"
           class="person-card not-arrived"
           :class="{ highlight: p.id % 6 === 0 }"
-          @click="$router.push({ name: 'trace', params: { id: p.id } })"
         >
           <div class="card-head">{{ p.name }}</div>
           <div class="avatar">
