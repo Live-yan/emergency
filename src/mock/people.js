@@ -53,6 +53,27 @@ const peopleExpected = Array.from({ length: expectedCount }).map((_, i) => {
 export const peopleArrived = peopleExpected.slice(0, arrivedCount);
 export const peopleNotArrived = peopleExpected.slice(arrivedCount, arrivedCount + notArrivedCount);
 
+// 为未到人员生成示例轨迹及最后一次出现信息
+peopleNotArrived.forEach((p, idx) => {
+  // 以北京天安门为中心在附近随机分布
+  const baseLon = 116.3975 + (rand() - 0.5) * 0.02;
+  const baseLat = 39.9087 + (rand() - 0.5) * 0.02;
+  const lastTime = Date.now() - Math.floor(rand() * 3600_000); // 过去一小时内
+  p.lastLon = baseLon;
+  p.lastLat = baseLat;
+  p.lastTime = lastTime;
+  p.confidence = Math.round(rand() * 100) / 100;
+  // 生成简单历史轨迹（向前回溯几分钟）
+  p.track = Array.from({ length: 5 }).map((_, i) => {
+    const factor = (i + 1) * 0.001;
+    return {
+      lon: baseLon - factor * (rand() - 0.5),
+      lat: baseLat - factor * (rand() - 0.5),
+      time: lastTime - (4 - i) * 60_000,
+    };
+  });
+});
+
 // Simulate small latency
 export function delay(ms = 300) {
   return new Promise((r) => setTimeout(r, ms));
