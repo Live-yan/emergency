@@ -16,6 +16,7 @@ const positions = ['工程师','技术员','值班员','调度员','班长','主
 const rooms = ['A101','A203','B110','C305','D210','E402'];
 const depts = ['运行部','维护部','安全部','设备部'];
 const shifts = ['白班','中班','夜班'];
+const areas = ['生活区','库房区','燃气区','办公区','机房区','发电区','生活配套区','后勤区','成品区','应急区'];
 
 function randDigit() { return String(Math.floor(rand() * 10) % 10); }
 function buildPhone() {
@@ -63,6 +64,8 @@ peopleNotArrived.forEach((p, idx) => {
   p.lastLat = baseLat;
   p.lastTime = lastTime;
   p.confidence = Math.round(rand() * 100) / 100;
+  p.lastArea = pick(areas);
+
   // 生成简单历史轨迹（向前回溯几分钟）
   p.track = Array.from({ length: 5 }).map((_, i) => {
     const factor = (i + 1) * 0.001;
