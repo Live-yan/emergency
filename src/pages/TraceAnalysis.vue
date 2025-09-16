@@ -1,10 +1,12 @@
 <script setup>
 import { ref, onMounted, onUnmounted, watch, computed, nextTick } from 'vue'
+
 import { useRoute } from 'vue-router'
 import { fetchNotArrivedPeople } from '../api/people'
 import MapLibreView from '../components/MapLibreView.vue'
 import MapboxDraw from '@mapbox/mapbox-gl-draw'
 import '@mapbox/mapbox-gl-draw/dist/mapbox-gl-draw.css'
+
 
 const people = ref([])
 const selected = ref(null)
@@ -13,6 +15,7 @@ const mapView = ref(null)
 let mapInstance = null
 let clock
 let destroyed = false
+
 
 const showTrack = ref(true)
 const showPredict = ref(true)
@@ -60,6 +63,7 @@ onMounted(async () => {
   people.value = await fetchNotArrivedPeople()
   clock = setInterval(() => (now.value = new Date()), 1000)
 
+
   const id = Number(route.query.id)
   if (id) {
     selected.value = people.value.find(p => p.id === id) || null
@@ -75,6 +79,7 @@ onMounted(async () => {
 onUnmounted(() => {
   destroyed = true
   clearInterval(clock)
+
   const map = getMap()
   if (map && drawControl) {
     drawEventCleanup.forEach(([event, handler]) => map.off(event, handler))
@@ -136,6 +141,7 @@ function bindMap(map) {
   }
 }
 
+
 function initLayers(map) {
   map.addSource('people', { type: 'geojson', data: emptyFc })
   map.addLayer({
@@ -181,6 +187,7 @@ function initLayers(map) {
     paint: { 'line-color': '#3b82f6', 'line-width': 1 },
   })
 }
+
 
 function initDraw(map) {
   if (drawControl) return
@@ -391,6 +398,7 @@ function cameraFeatures() {
             [c.lon - hw, c.lat - hh],
           ],
         ],
+
       },
     }
   })
@@ -423,6 +431,7 @@ watch([showTrack, showPredict], updateLayers)
 watch(selected, updateLayers)
 watch(showCamera, val => {
   const map = getMap()
+
   if (!map || !map.isStyleLoaded()) return
   const vis = val ? 'visible' : 'none'
   if (map.getLayer('cam-fill')) map.setLayoutProperty('cam-fill', 'visibility', vis)
@@ -492,6 +501,7 @@ function formatTime(t) {
             <div class="detail">岗位：{{ p.position || '未知岗位' }}</div>
             <div class="detail location">当前位置：{{ p.lastArea || '未知区域' }}</div>
             <div class="detail">最后出现：{{ formatTime(p.lastTime) }}</div>
+
           </div>
         </div>
       </div>
@@ -544,6 +554,7 @@ function formatTime(t) {
           </div>
         </div>
       </div>
+
     </div>
   </div>
 </template>
@@ -568,6 +579,7 @@ function formatTime(t) {
   font-size: 18px;
   font-weight: 600;
   color: #0f172a;
+
 }
 .controls {
   display: flex;
@@ -590,6 +602,7 @@ function formatTime(t) {
 }
 .person:hover {
   background: #eff6ff;
+
 }
 .person.selected {
   background: #dbeafe;
@@ -630,6 +643,7 @@ function formatTime(t) {
   color: #0f172a;
   font-weight: 500;
 }
+
 .map-container {
   position: relative;
   flex: 1;
@@ -810,4 +824,5 @@ function formatTime(t) {
     width: clamp(200px, 40vw, 280px);
   }
 }
+
 </style>

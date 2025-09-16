@@ -130,10 +130,12 @@ onUnmounted(() => {
   }
 })
 
+
 // 允许父组件在地图初始化后获取 map 实例，以便叠加轨迹等自定义图层
 defineExpose({
   getMap: () => map,
   whenReady: () => (map ? Promise.resolve(map) : new Promise(resolve => readyResolvers.push(resolve))),
+
 })
 </script>
 
