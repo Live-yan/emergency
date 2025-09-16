@@ -55,8 +55,13 @@ const emptyFc = { type: 'FeatureCollection', features: [] }
 
 let drawControl = null
 const drawEventCleanup = []
+const mapInteractionCleanup = []
 let zoneCounter = 0
 const zonePalette = ['#38bdf8', '#34d399', '#f472b6', '#facc15', '#f97316', '#a855f7', '#22d3ee', '#f87171']
+
+const peopleClusterSourceId = 'people-all'
+const avatarImagePromises = new Map()
+const labelBackgroundId = 'person-label-bg'
 
 onMounted(async () => {
   destroyed = false
@@ -87,6 +92,16 @@ onUnmounted(() => {
     drawControl = null
   }
   drawEventCleanup.length = 0
+  if (map) {
+    mapInteractionCleanup.forEach(([event, layer, handler]) => {
+      if (typeof layer === 'string' && handler) {
+        map.off(event, layer, handler)
+      } else if (handler) {
+        map.off(event, handler)
+      }
+    })
+  }
+  mapInteractionCleanup.length = 0
   mapInstance = null
   isMapReady.value = false
 })
@@ -124,6 +139,9 @@ function bindMap(map) {
       map.setZoom(map.getZoom() + zoomBoost)
       initLayers(map)
     }
+    if (!mapInteractionCleanup.length) {
+      registerPeopleInteractions(map)
+    }
     initDraw(map)
     currentMode.value = 'simple_select'
     editingZoneId.value = null
@@ -131,6 +149,7 @@ function bindMap(map) {
       syncCustomZones()
     }
     updateLayers()
+    refreshPeopleSource()
     isMapReady.value = true
   }
 
@@ -143,18 +162,13 @@ function bindMap(map) {
 
 
 function initLayers(map) {
-  map.addSource('people', { type: 'geojson', data: emptyFc })
+  ensureLabelBackground(map)
+  map.addSource('predict', { type: 'geojson', data: emptyFc })
   map.addLayer({
-    id: 'people',
-    type: 'symbol',
-    source: 'people',
-    layout: {
-      'icon-image': 'marker-15',
-      'icon-anchor': 'bottom',
-      'text-field': ['get', 'name'],
-      'text-size': 12,
-      'text-offset': [0, 1],
-    },
+    id: 'predict',
+    type: 'fill',
+    source: 'predict',
+    paint: { 'fill-color': '#fbbf24', 'fill-opacity': 0.3 },
   })
 
   map.addSource('track', { type: 'geojson', data: emptyFc })
@@ -165,12 +179,116 @@ function initLayers(map) {
     paint: { 'line-color': '#ef4444', 'line-width': 2 },
   })
 
-  map.addSource('predict', { type: 'geojson', data: emptyFc })
+  map.addSource('people', { type: 'geojson', data: emptyFc })
   map.addLayer({
-    id: 'predict',
-    type: 'fill',
-    source: 'predict',
-    paint: { 'fill-color': '#fbbf24', 'fill-opacity': 0.3 },
+    id: 'people-focus',
+    type: 'circle',
+    source: 'people',
+    paint: {
+      'circle-radius': [
+        'interpolate',
+        ['linear'],
+        ['zoom'],
+        12,
+        18,
+        18,
+        28,
+      ],
+      'circle-color': '#f97316',
+      'circle-opacity': 0.22,
+      'circle-stroke-color': '#f97316',
+      'circle-stroke-width': 2,
+    },
+  })
+
+  map.addSource(peopleClusterSourceId, {
+    type: 'geojson',
+    data: emptyFc,
+    cluster: true,
+    clusterRadius: 64,
+    clusterMaxZoom: 16,
+  })
+
+  map.addLayer({
+    id: 'people-clusters',
+    type: 'circle',
+    source: peopleClusterSourceId,
+    filter: ['has', 'point_count'],
+    paint: {
+      'circle-color': '#2563eb',
+      'circle-opacity': 0.85,
+      'circle-radius': [
+        'step',
+        ['get', 'point_count'],
+        20,
+        10,
+        26,
+        25,
+        34,
+        50,
+        42,
+      ],
+    },
+  })
+
+  map.addLayer({
+    id: 'people-cluster-count',
+    type: 'symbol',
+    source: peopleClusterSourceId,
+    filter: ['has', 'point_count'],
+    layout: {
+      'text-field': ['get', 'point_count'],
+      'text-font': ['Open Sans Semibold', 'Arial Unicode MS Bold'],
+      'text-size': 12,
+    },
+    paint: {
+      'text-color': '#ffffff',
+    },
+  })
+
+  map.addLayer({
+    id: 'people-avatars',
+    type: 'symbol',
+    source: peopleClusterSourceId,
+    filter: ['!', ['has', 'point_count']],
+    layout: {
+      'icon-image': ['get', 'icon'],
+      'icon-size': [
+        'case',
+        ['==', ['get', 'selected'], 1],
+        0.58,
+        0.48,
+      ],
+      'icon-allow-overlap': true,
+      'icon-ignore-placement': true,
+    },
+  })
+
+  map.addLayer({
+    id: 'people-labels',
+    type: 'symbol',
+    source: peopleClusterSourceId,
+    minzoom: 12,
+    filter: ['!', ['has', 'point_count']],
+    layout: {
+      'icon-image': labelBackgroundId,
+      'icon-size': 1,
+      'icon-anchor': 'left',
+      'text-anchor': 'left',
+      'icon-allow-overlap': false,
+      'text-field': ['get', 'label'],
+      'text-font': ['Open Sans Regular', 'Arial Unicode MS Regular'],
+      'text-size': 12,
+      'text-line-height': 1.3,
+      'text-offset': [1.1, 0],
+      'icon-offset': [1.1, 0],
+      'icon-text-fit': 'both',
+      'icon-text-fit-padding': [10, 14, 10, 14],
+      'text-max-width': 22,
+    },
+    paint: {
+      'text-color': '#0f172a',
+    },
   })
 
   map.addSource('cams', { type: 'geojson', data: { type: 'FeatureCollection', features: cameraFeatures() } })
@@ -404,6 +522,205 @@ function cameraFeatures() {
   })
 }
 
+function roundedRectPath(ctx, x, y, w, h, r) {
+  const radius = Math.min(r, w / 2, h / 2)
+  ctx.beginPath()
+  ctx.moveTo(x + radius, y)
+  ctx.lineTo(x + w - radius, y)
+  ctx.quadraticCurveTo(x + w, y, x + w, y + radius)
+  ctx.lineTo(x + w, y + h - radius)
+  ctx.quadraticCurveTo(x + w, y + h, x + w - radius, y + h)
+  ctx.lineTo(x + radius, y + h)
+  ctx.quadraticCurveTo(x, y + h, x, y + h - radius)
+  ctx.lineTo(x, y + radius)
+  ctx.quadraticCurveTo(x, y, x + radius, y)
+  ctx.closePath()
+}
+
+function ensureLabelBackground(map) {
+  if (!map || map.hasImage(labelBackgroundId)) return
+  const width = 200
+  const height = 96
+  const canvas = document.createElement('canvas')
+  canvas.width = width
+  canvas.height = height
+  const ctx = canvas.getContext('2d')
+  ctx.fillStyle = 'rgba(248, 250, 252, 0.94)'
+  ctx.strokeStyle = 'rgba(148, 163, 184, 0.6)'
+  ctx.lineWidth = 4
+  roundedRectPath(ctx, 4, 4, width - 8, height - 8, 18)
+  ctx.fill()
+  ctx.stroke()
+  const imageData = ctx.getImageData(0, 0, width, height)
+  map.addImage(
+    labelBackgroundId,
+    { width, height, data: imageData.data },
+    { pixelRatio: 2 }
+  )
+}
+
+function iconIdForAvatar(url) {
+  if (!url) return 'avatar-default'
+  return `avatar-${url.replace(/[^a-z0-9]/gi, '_')}`
+}
+
+function loadImageElement(url) {
+  return new Promise((resolve, reject) => {
+    const img = new Image()
+    img.crossOrigin = 'anonymous'
+    img.onload = () => resolve(img)
+    img.onerror = err => reject(err)
+    img.src = url
+  })
+}
+
+async function ensureAvatarIcon(map, url) {
+  const fallbackUrl = '/avatars/default.png'
+  const targetUrl = url || fallbackUrl
+  const iconId = iconIdForAvatar(targetUrl)
+  if (!map) return iconId
+  if (map.hasImage(iconId)) return iconId
+  if (avatarImagePromises.has(iconId)) {
+    await avatarImagePromises.get(iconId)
+    return iconId
+  }
+  const promise = (async () => {
+    try {
+      const img = await loadImageElement(targetUrl)
+      const size = 160
+      const canvas = document.createElement('canvas')
+      canvas.width = size
+      canvas.height = size
+      const ctx = canvas.getContext('2d')
+      const radius = size / 2 - 4
+      ctx.clearRect(0, 0, size, size)
+      ctx.save()
+      ctx.beginPath()
+      ctx.arc(size / 2, size / 2, radius, 0, Math.PI * 2)
+      ctx.closePath()
+      ctx.clip()
+      ctx.drawImage(img, 0, 0, size, size)
+      ctx.restore()
+      ctx.beginPath()
+      ctx.arc(size / 2, size / 2, radius, 0, Math.PI * 2)
+      ctx.strokeStyle = 'rgba(15, 23, 42, 0.3)'
+      ctx.lineWidth = 6
+      ctx.stroke()
+      const imageData = ctx.getImageData(0, 0, size, size)
+      map.addImage(
+        iconId,
+        { width: size, height: size, data: imageData.data },
+        { pixelRatio: 2 }
+      )
+      return iconId
+    } catch (err) {
+      console.warn('加载头像失败，将使用默认头像', err)
+      if (targetUrl !== fallbackUrl) {
+        return ensureAvatarIcon(map, fallbackUrl)
+      }
+      return 'avatar-default'
+    }
+  })()
+  avatarImagePromises.set(iconId, promise)
+  try {
+    return await promise
+  } finally {
+    avatarImagePromises.delete(iconId)
+  }
+}
+
+function buildLabelText(p) {
+  const role = p.position || '未知岗位'
+  const area = p.lastArea || '未知区域'
+  const timeText = p.lastTime ? formatTime(p.lastTime) : '时间未知'
+  return `${p.name}｜${role}\n最后出现：${area}\n时间：${timeText}`
+}
+
+function buildPeopleCollection() {
+  const selectedId = selected.value?.id || null
+  const features = people.value
+    .filter(p => Number.isFinite(p.lastLon) && Number.isFinite(p.lastLat))
+    .map(p => ({
+      type: 'Feature',
+      properties: {
+        id: p.id,
+        name: p.name,
+        position: p.position,
+        lastArea: p.lastArea,
+        lastTime: p.lastTime,
+        avatarUrl: p.avatar,
+        selected: selectedId && selectedId === p.id ? 1 : 0,
+      },
+      geometry: { type: 'Point', coordinates: [p.lastLon, p.lastLat] },
+    }))
+
+  return { type: 'FeatureCollection', features }
+}
+
+async function refreshPeopleSource() {
+  const map = getMap()
+  if (!map || !map.isStyleLoaded()) return
+  const source = map.getSource(peopleClusterSourceId)
+  if (!source) return
+  ensureLabelBackground(map)
+  await ensureAvatarIcon(map, '/avatars/default.png')
+  const collection = buildPeopleCollection()
+  const iconCache = new Map()
+  for (const feature of collection.features) {
+    const url = feature.properties.avatarUrl
+    if (!iconCache.has(url || '')) {
+      const ensured = await ensureAvatarIcon(map, url)
+      iconCache.set(url || '', ensured)
+    }
+    feature.properties.icon = iconCache.get(url || '') || 'avatar-default'
+    feature.properties.label = buildLabelText(feature.properties)
+  }
+  source.setData(collection)
+}
+
+function registerPeopleInteractions(map) {
+  if (!map) return
+  const register = (event, layerId, handler) => {
+    map.on(event, layerId, handler)
+    mapInteractionCleanup.push([event, layerId, handler])
+  }
+
+  register('click', 'people-clusters', e => {
+    const feature = e.features && e.features[0]
+    if (!feature) return
+    const source = map.getSource(peopleClusterSourceId)
+    if (!source || typeof source.getClusterExpansionZoom !== 'function') return
+    const clusterId = feature.properties.cluster_id
+    source.getClusterExpansionZoom(clusterId, (err, zoom) => {
+      if (err) return
+      map.easeTo({ center: feature.geometry.coordinates, zoom })
+    })
+  })
+
+  const setCursor = value => {
+    const canvas = map.getCanvas()
+    if (canvas) {
+      canvas.style.cursor = value
+    }
+  }
+
+  register('mouseenter', 'people-clusters', () => setCursor('pointer'))
+  register('mouseleave', 'people-clusters', () => setCursor(''))
+  register('mouseenter', 'people-avatars', () => setCursor('pointer'))
+  register('mouseleave', 'people-avatars', () => setCursor(''))
+
+  register('click', 'people-avatars', e => {
+    const feature = e.features && e.features[0]
+    if (!feature) return
+    const id = Number(feature.properties?.id)
+    if (!id) return
+    const target = people.value.find(p => p.id === id)
+    if (target) {
+      selectPerson(target)
+    }
+  })
+}
+
 function selectPerson(p) {
   selected.value = p
   const map = getMap()
@@ -428,7 +745,13 @@ function updateLayers() {
 }
 
 watch([showTrack, showPredict], updateLayers)
-watch(selected, updateLayers)
+watch(selected, () => {
+  updateLayers()
+  refreshPeopleSource()
+})
+watch(people, () => {
+  refreshPeopleSource()
+})
 watch(showCamera, val => {
   const map = getMap()
 
