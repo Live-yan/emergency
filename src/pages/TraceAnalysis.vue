@@ -1,5 +1,6 @@
 <script setup>
-import { ref, onMounted, onUnmounted, watch, computed } from 'vue'
+import { ref, onMounted, onUnmounted, watch, computed, nextTick } from 'vue'
+
 import { useRoute } from 'vue-router'
 import { fetchNotArrivedPeople } from '../api/people'
 import MapLibreView from '../components/MapLibreView.vue'
@@ -11,15 +12,14 @@ const people = ref([])
 const selected = ref(null)
 const now = ref(new Date())
 const mapView = ref(null)
-
 let mapInstance = null
-
 let clock
+let destroyed = false
+
 
 const showTrack = ref(true)
 const showPredict = ref(true)
 const showCamera = ref(true)
-
 
 const customZones = ref([])
 const activeZoneId = ref(null)
@@ -59,6 +59,7 @@ let zoneCounter = 0
 const zonePalette = ['#38bdf8', '#34d399', '#f472b6', '#facc15', '#f97316', '#a855f7', '#22d3ee', '#f87171']
 
 onMounted(async () => {
+  destroyed = false
   people.value = await fetchNotArrivedPeople()
   clock = setInterval(() => (now.value = new Date()), 1000)
 
@@ -68,28 +69,15 @@ onMounted(async () => {
     selected.value = people.value.find(p => p.id === id) || null
   }
 
-
-  const map = getMap()
-  if (!map) return
-  mapInstance = map
-
-  const setupLayers = () => {
-    map.setZoom(map.getZoom() + zoomBoost)
-    initLayers(map)
-    initDraw(map)
-    updateLayers()
-    isMapReady.value = true
+  await nextTick()
+  const map = await waitForMapInstance()
+  if (!destroyed && map) {
+    bindMap(map)
   }
-
-  if (map.isStyleLoaded()) {
-    setupLayers()
-  } else {
-    map.once('load', setupLayers)
-  }
-
 })
 
 onUnmounted(() => {
+  destroyed = true
   clearInterval(clock)
 
   const map = getMap()
@@ -105,6 +93,52 @@ onUnmounted(() => {
 
 function getMap() {
   return mapInstance || mapView.value?.getMap()
+}
+
+async function waitForMapInstance() {
+  const view = mapView.value
+  if (!view) return null
+  if (typeof view.getMap === 'function') {
+    const existing = view.getMap()
+    if (existing) return existing
+  }
+  if (typeof view.whenReady === 'function') {
+    try {
+      const map = await view.whenReady()
+      return map || null
+    } catch (err) {
+      console.error(err)
+      return null
+    }
+  }
+  return null
+}
+
+function bindMap(map) {
+  if (!map) return
+  mapInstance = map
+
+  const setupLayers = () => {
+    const hasPeopleSource = !!map.getSource('people')
+    if (!hasPeopleSource) {
+      map.setZoom(map.getZoom() + zoomBoost)
+      initLayers(map)
+    }
+    initDraw(map)
+    currentMode.value = 'simple_select'
+    editingZoneId.value = null
+    if (drawControl) {
+      syncCustomZones()
+    }
+    updateLayers()
+    isMapReady.value = true
+  }
+
+  if (map.isStyleLoaded()) {
+    setupLayers()
+  } else {
+    map.once('load', setupLayers)
+  }
 }
 
 
@@ -138,8 +172,6 @@ function initLayers(map) {
     source: 'predict',
     paint: { 'fill-color': '#fbbf24', 'fill-opacity': 0.3 },
   })
-
-
 
   map.addSource('cams', { type: 'geojson', data: { type: 'FeatureCollection', features: cameraFeatures() } })
   map.addLayer({
@@ -440,6 +472,7 @@ function formatTime(t) {
   return d.toLocaleString()
 }
 </script>
+
 
 
 <template>
