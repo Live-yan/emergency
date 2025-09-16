@@ -65,6 +65,7 @@ peopleNotArrived.forEach((p, idx) => {
   p.lastTime = lastTime;
   p.confidence = Math.round(rand() * 100) / 100;
   p.lastArea = pick(areas);
+
   // 生成简单历史轨迹（向前回溯几分钟）
   p.track = Array.from({ length: 5 }).map((_, i) => {
     const factor = (i + 1) * 0.001;
