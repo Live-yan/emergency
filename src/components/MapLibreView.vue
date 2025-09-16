@@ -12,6 +12,19 @@ const props = defineProps({
 
 const containerRef = ref(null)
 let map
+const readyResolvers = []
+
+function resolveReady(instance) {
+  if (!readyResolvers.length) return
+  const resolvers = readyResolvers.splice(0, readyResolvers.length)
+  resolvers.forEach(cb => {
+    try {
+      cb(instance)
+    } catch (err) {
+      console.error(err)
+    }
+  })
+}
 
 async function hasFile(url){
   try {
@@ -88,6 +101,7 @@ async function init(){
     zoom: props.zoom,
     hash: false,
   })
+  resolveReady(map)
   // 添加基本控件
   map.addControl(new maplibregl.NavigationControl({ showCompass: true }), 'top-right')
 
@@ -107,7 +121,20 @@ async function init(){
 }
 
 onMounted(init)
-onUnmounted(() => { if (map) { map.remove(); map = null } })
+onUnmounted(() => {
+  resolveReady(null)
+  readyResolvers.length = 0
+  if (map) {
+    map.remove()
+    map = null
+  }
+})
+
+// 允许父组件在地图初始化后获取 map 实例，以便叠加轨迹等自定义图层
+defineExpose({
+  getMap: () => map,
+  whenReady: () => (map ? Promise.resolve(map) : new Promise(resolve => readyResolvers.push(resolve))),
+})
 </script>
 
 <template>
