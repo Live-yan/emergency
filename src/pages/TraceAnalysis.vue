@@ -15,6 +15,8 @@ const mapView = ref(null)
 let mapInstance = null
 let clock
 let destroyed = false
+let hasFittedInitialView = false
+let pendingFocus = null
 
 
 const showTrack = ref(true)
@@ -65,13 +67,19 @@ const labelBackgroundId = 'person-label-bg'
 
 onMounted(async () => {
   destroyed = false
+  hasFittedInitialView = false
+  pendingFocus = null
   people.value = await fetchNotArrivedPeople()
   clock = setInterval(() => (now.value = new Date()), 1000)
 
 
   const id = Number(route.query.id)
   if (id) {
-    selected.value = people.value.find(p => p.id === id) || null
+    const target = people.value.find(p => p.id === id) || null
+    if (target) {
+      selected.value = target
+      focusPersonOnMap(target, { instant: true, preserveZoom: true })
+    }
   }
 
   await nextTick()
@@ -84,6 +92,8 @@ onMounted(async () => {
 onUnmounted(() => {
   destroyed = true
   clearInterval(clock)
+  hasFittedInitialView = false
+  pendingFocus = null
 
   const map = getMap()
   if (map && drawControl) {
@@ -133,7 +143,7 @@ function bindMap(map) {
   if (!map) return
   mapInstance = map
 
-  const setupLayers = () => {
+  const setupLayers = async () => {
     const hasPeopleSource = !!map.getSource('people')
     if (!hasPeopleSource) {
       map.setZoom(map.getZoom() + zoomBoost)
@@ -149,8 +159,18 @@ function bindMap(map) {
       syncCustomZones()
     }
     updateLayers()
-    refreshPeopleSource()
+    await refreshPeopleSource()
     isMapReady.value = true
+
+    if (pendingFocus && pendingFocus.id) {
+      const target = people.value.find(p => p.id === pendingFocus.id)
+      if (target) {
+        const options = pendingFocus.options || {}
+        focusPersonOnMap(target, { ...options, instant: true })
+      }
+    } else if (!hasFittedInitialView) {
+      fitMapToPeople()
+    }
   }
 
   if (map.isStyleLoaded()) {
@@ -283,8 +303,8 @@ function initLayers(map) {
       'text-offset': [1.1, 0],
       'icon-offset': [1.1, 0],
       'icon-text-fit': 'both',
-      'icon-text-fit-padding': [10, 14, 10, 14],
-      'text-max-width': 22,
+      'icon-text-fit-padding': [12, 18, 14, 18],
+      'text-max-width': 28,
     },
     paint: {
       'text-color': '#0f172a',
@@ -539,8 +559,8 @@ function roundedRectPath(ctx, x, y, w, h, r) {
 
 function ensureLabelBackground(map) {
   if (!map || map.hasImage(labelBackgroundId)) return
-  const width = 200
-  const height = 96
+  const width = 240
+  const height = 170
   const canvas = document.createElement('canvas')
   canvas.width = width
   canvas.height = height
@@ -629,30 +649,167 @@ async function ensureAvatarIcon(map, url) {
   }
 }
 
+function normalizeNumber(value) {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : null
+  }
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value)
+    return Number.isFinite(parsed) ? parsed : null
+  }
+  return null
+}
+
+function tryCoordinatePair(lon, lat, source) {
+  const lonNum = normalizeNumber(lon)
+  const latNum = normalizeNumber(lat)
+  if (lonNum == null || latNum == null) return null
+  return { lon: lonNum, lat: latNum, source }
+}
+
+function coordinateFromLocationObject(obj) {
+  if (!obj) return null
+  if (Array.isArray(obj)) {
+    const [lon, lat] = obj
+    return tryCoordinatePair(lon, lat, 'prediction')
+  }
+  if (typeof obj !== 'object') return null
+
+  if (Array.isArray(obj.center)) {
+    const [lon, lat] = obj.center
+    const coord = tryCoordinatePair(lon, lat, 'prediction')
+    if (coord) return coord
+  } else if (obj.center && typeof obj.center === 'object') {
+    const coord = tryCoordinatePair(obj.center.lon ?? obj.center.lng ?? obj.center.longitude, obj.center.lat ?? obj.center.latitude, 'prediction')
+    if (coord) return coord
+  }
+  if (Array.isArray(obj.centre)) {
+    const [lon, lat] = obj.centre
+    const coord = tryCoordinatePair(lon, lat, 'prediction')
+    if (coord) return coord
+  } else if (obj.centre && typeof obj.centre === 'object') {
+    const coord = tryCoordinatePair(obj.centre.lon ?? obj.centre.lng ?? obj.centre.longitude, obj.centre.lat ?? obj.centre.latitude, 'prediction')
+    if (coord) return coord
+  }
+
+  const nested = obj.location || obj.position
+  if (Array.isArray(nested)) {
+    const [lon, lat] = nested
+    const coord = tryCoordinatePair(lon, lat, 'prediction')
+    if (coord) return coord
+  } else if (nested && typeof nested === 'object') {
+    const coord =
+      tryCoordinatePair(nested.lon ?? nested.lng ?? nested.longitude, nested.lat ?? nested.latitude, 'prediction') ||
+      tryCoordinatePair(nested.x, nested.y, 'prediction')
+    if (coord) return coord
+  }
+
+  const coord =
+    tryCoordinatePair(obj.lon ?? obj.lng ?? obj.longitude, obj.lat ?? obj.latitude, 'prediction') ||
+    tryCoordinatePair(obj.x, obj.y, 'prediction')
+  if (coord) return coord
+
+  return null
+}
+
+function resolvePersonCoordinate(person) {
+  if (!person) return null
+  const direct =
+    tryCoordinatePair(person.lastLon, person.lastLat, 'last') ||
+    tryCoordinatePair(person.lastLng, person.lastLat, 'last') ||
+    tryCoordinatePair(person.currentLon, person.currentLat, 'current') ||
+    tryCoordinatePair(person.currentLng, person.currentLat, 'current') ||
+    tryCoordinatePair(person.currentLongitude, person.currentLatitude, 'current') ||
+    tryCoordinatePair(person.lon, person.lat, 'last') ||
+    tryCoordinatePair(person.lng, person.lat, 'last') ||
+    tryCoordinatePair(person.longitude, person.latitude, 'last')
+  if (direct) return direct
+
+  if (Array.isArray(person.track)) {
+    for (let i = person.track.length - 1; i >= 0; i -= 1) {
+      const point = person.track[i]
+      const coord = tryCoordinatePair(point?.lon ?? point?.lng ?? point?.longitude, point?.lat ?? point?.latitude, 'history')
+      if (coord) return coord
+    }
+  }
+
+  const predictedPair =
+    tryCoordinatePair(person.predictLon, person.predictLat, 'prediction') ||
+    tryCoordinatePair(person.predictedLon, person.predictedLat, 'prediction') ||
+    tryCoordinatePair(person.estimateLon, person.estimateLat, 'prediction') ||
+    tryCoordinatePair(person.predictionLon, person.predictionLat, 'prediction')
+  if (predictedPair) return predictedPair
+
+  const predictionSources = [
+    person.prediction,
+    person.predict,
+    person.predicted,
+    person.estimatedLocation,
+    person.estimate,
+    person.predictionCenter,
+  ]
+  for (const item of predictionSources) {
+    const coord = coordinateFromLocationObject(item)
+    if (coord) return coord
+  }
+
+  return null
+}
+
+function maskPhone(phone) {
+  if (!phone) return '未知电话'
+  const value = String(phone)
+  if (value.length < 7) return value
+  return value.replace(/(\d{3})\d{4}(\d+)/, '$1****$2')
+}
+
 function buildLabelText(p) {
   const role = p.position || '未知岗位'
+  const dept = p.dept || '未知部门'
+  const room = p.room || '未知房间'
+  const shift = p.shift || '未知班次'
+  const phone = p.maskedPhone || maskPhone(p.phone)
   const area = p.lastArea || '未知区域'
+  let sourceLabel = '最后位置'
+  if (p.coordinateSource === 'prediction') {
+    sourceLabel = '预测位置'
+  } else if (p.coordinateSource === 'current') {
+    sourceLabel = '当前位置'
+  } else if (p.coordinateSource === 'history') {
+    sourceLabel = '轨迹推算'
+  }
   const timeText = p.lastTime ? formatTime(p.lastTime) : '时间未知'
-  return `${p.name}｜${role}\n最后出现：${area}\n时间：${timeText}`
+  return `${p.name}｜${role}\n部门：${dept}｜房间：${room}\n班次：${shift}｜电话：${phone}\n${sourceLabel}：${area}\n时间：${timeText}`
 }
 
 function buildPeopleCollection() {
   const selectedId = selected.value?.id || null
   const features = people.value
-    .filter(p => Number.isFinite(p.lastLon) && Number.isFinite(p.lastLat))
-    .map(p => ({
-      type: 'Feature',
-      properties: {
-        id: p.id,
-        name: p.name,
-        position: p.position,
-        lastArea: p.lastArea,
-        lastTime: p.lastTime,
-        avatarUrl: p.avatar,
-        selected: selectedId && selectedId === p.id ? 1 : 0,
-      },
-      geometry: { type: 'Point', coordinates: [p.lastLon, p.lastLat] },
-    }))
+    .map(p => {
+      const coord = resolvePersonCoordinate(p)
+      if (!coord) return null
+      const maskedPhone = maskPhone(p.phone)
+      return {
+        type: 'Feature',
+        properties: {
+          id: p.id,
+          name: p.name,
+          position: p.position,
+          dept: p.dept,
+          room: p.room,
+          shift: p.shift,
+          phone: p.phone,
+          maskedPhone,
+          lastArea: p.lastArea,
+          lastTime: p.lastTime,
+          avatarUrl: p.avatar,
+          coordinateSource: coord.source,
+          selected: selectedId && selectedId === p.id ? 1 : 0,
+        },
+        geometry: { type: 'Point', coordinates: [coord.lon, coord.lat] },
+      }
+    })
+    .filter(Boolean)
 
   return { type: 'FeatureCollection', features }
 }
@@ -676,6 +833,53 @@ async function refreshPeopleSource() {
     feature.properties.label = buildLabelText(feature.properties)
   }
   source.setData(collection)
+
+  if (!hasFittedInitialView && !pendingFocus && collection.features.length) {
+    fitMapToPeople(collection)
+  }
+}
+
+function fitMapToPeople(collection) {
+  const map = getMap()
+  if (!map || !map.isStyleLoaded()) return
+  const data = collection || buildPeopleCollection()
+  const coordinates = data.features
+    .map(f => f.geometry?.coordinates)
+    .filter(coord => Array.isArray(coord) && coord.length >= 2)
+    .map(coord => [normalizeNumber(coord[0]), normalizeNumber(coord[1])])
+    .filter(coord => coord[0] != null && coord[1] != null)
+
+  if (!coordinates.length) return
+
+  let [minLon, minLat] = coordinates[0]
+  let [maxLon, maxLat] = coordinates[0]
+  coordinates.forEach(([lon, lat]) => {
+    if (lon < minLon) minLon = lon
+    if (lon > maxLon) maxLon = lon
+    if (lat < minLat) minLat = lat
+    if (lat > maxLat) maxLat = lat
+  })
+
+  if (minLon === maxLon && minLat === maxLat) {
+    const delta = 0.0012
+    minLon -= delta
+    maxLon += delta
+    minLat -= delta
+    maxLat += delta
+  }
+
+  map.fitBounds(
+    [
+      [minLon, minLat],
+      [maxLon, maxLat],
+    ],
+    {
+      padding: { top: 80, bottom: 80, left: 80, right: 240 },
+      duration: 800,
+      maxZoom: 17,
+    }
+  )
+  hasFittedInitialView = true
 }
 
 function registerPeopleInteractions(map) {
@@ -721,12 +925,32 @@ function registerPeopleInteractions(map) {
   })
 }
 
-function selectPerson(p) {
-  selected.value = p
+function focusPersonOnMap(p, options = {}) {
+  if (!p) return
+  const resolved = resolvePersonCoordinate(p)
+  if (!resolved) return
   const map = getMap()
-  if (map && map.isStyleLoaded()) {
-    map.flyTo({ center: [p.lastLon, p.lastLat], zoom: Math.max(map.getZoom(), 17) })
+  const clonedOptions = { ...options }
+  if (!map || !map.isStyleLoaded()) {
+    pendingFocus = { id: p.id, options: clonedOptions }
+    hasFittedInitialView = true
+    return
   }
+  const explicitZoom = normalizeNumber(clonedOptions.zoom)
+  const preserveZoom = !!clonedOptions.preserveZoom
+  const instant = !!clonedOptions.instant
+  const currentZoom = map.getZoom()
+  const targetZoom =
+    explicitZoom != null ? explicitZoom : preserveZoom ? currentZoom : Math.max(currentZoom, 17)
+  map.flyTo({ center: [resolved.lon, resolved.lat], zoom: targetZoom, duration: instant ? 0 : 800 })
+  hasFittedInitialView = true
+  pendingFocus = null
+}
+
+function selectPerson(p) {
+  if (!p) return
+  selected.value = p
+  focusPersonOnMap(p)
 }
 
 function updateLayers() {
@@ -739,9 +963,14 @@ function updateLayers() {
   if (!peopleSource || !trackSource || !predictSource) return
 
   const p = selected.value
-  peopleSource.setData(p ? { type: 'FeatureCollection', features: [pointFeature(p)] } : emptyFc)
-  trackSource.setData(p && showTrack.value ? { type: 'FeatureCollection', features: [lineFeature(p)] } : emptyFc)
-  predictSource.setData(p && showPredict.value ? predictionFeature(p) : emptyFc)
+  const highlight = p ? pointFeature(p) : null
+  peopleSource.setData(highlight ? { type: 'FeatureCollection', features: [highlight] } : emptyFc)
+
+  const trackFeatureData = p && showTrack.value ? lineFeature(p) : null
+  trackSource.setData(trackFeatureData ? { type: 'FeatureCollection', features: [trackFeatureData] } : emptyFc)
+
+  const predictData = p && showPredict.value ? predictionFeature(p) : emptyFc
+  predictSource.setData(predictData)
 }
 
 watch([showTrack, showPredict], updateLayers)
@@ -762,30 +991,43 @@ watch(showCamera, val => {
 })
 
 function pointFeature(p) {
+  const coord = resolvePersonCoordinate(p)
+  if (!coord) return null
   return {
     type: 'Feature',
     properties: { name: p.name },
-    geometry: { type: 'Point', coordinates: [p.lastLon, p.lastLat] },
+    geometry: { type: 'Point', coordinates: [coord.lon, coord.lat] },
   }
 }
 
 function lineFeature(p) {
+  if (!Array.isArray(p.track)) return null
+  const coordinates = p.track
+    .map(item => {
+      const lon = normalizeNumber(item?.lon ?? item?.lng ?? item?.longitude)
+      const lat = normalizeNumber(item?.lat ?? item?.latitude)
+      return lon != null && lat != null ? [lon, lat] : null
+    })
+    .filter(Boolean)
+  if (coordinates.length < 2) return null
   return {
     type: 'Feature',
     geometry: {
       type: 'LineString',
-      coordinates: p.track.map(t => [t.lon, t.lat]),
+      coordinates,
     },
   }
 }
 
 function predictionFeature(p) {
+  const center = resolvePersonCoordinate(p)
+  if (!center) return emptyFc
   const R = 0.0015
   const steps = 24
   const coords = []
   for (let i = 0; i <= steps; i++) {
     const a = (i / steps) * Math.PI * 2
-    coords.push([p.lastLon + Math.cos(a) * R, p.lastLat + Math.sin(a) * R])
+    coords.push([center.lon + Math.cos(a) * R, center.lat + Math.sin(a) * R])
   }
   return { type: 'FeatureCollection', features: [{ type: 'Feature', geometry: { type: 'Polygon', coordinates: [coords] } }] }
 }
