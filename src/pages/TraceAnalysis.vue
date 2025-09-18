@@ -31,25 +31,31 @@ const isMapReady = ref(false)
 
 const isDrawing = computed(() => currentMode.value === 'draw_polygon')
 const isEditingMode = computed(() => currentMode.value === 'direct_select')
-const editingZoneName = computed(() => {
-  if (!editingZoneId.value) return ''
-  const zone = customZones.value.find(z => z.id === editingZoneId.value)
-  return zone?.name || ''
-})
-const zonePanelHint = computed(() => {
-  if (isDrawing.value) {
-    return '正在绘制：单击地图放置顶点，双击闭合多边形完成区域。'
-  }
-  if (isEditingMode.value) {
-    const label = editingZoneName.value ? `《${editingZoneName.value}》` : '选中的区域'
-    return `正在编辑${label}，拖动顶点调整边界，完成后点击“完成编辑”。`
-  }
-  return '点击“新增区域”即可绘制多边形区域，可在列表中快速定位、重命名或删除。'
-})
+const activeZone = computed(() => customZones.value.find(z => z.id === activeZoneId.value) || null)
 const canStartDrawing = computed(() => isMapReady.value && !isDrawing.value && !isEditingMode.value)
+const toolbarSelectedZoneId = computed({
+  get: () => (activeZoneId.value ? String(activeZoneId.value) : ''),
+  set: val => {
+    if (!val) {
+      activeZoneId.value = null
+      if (drawControl) {
+        drawControl.changeMode('simple_select')
+      }
+      return
+    }
+    const zone = customZones.value.find(z => String(z.id) === String(val))
+    if (zone) {
+      selectZone(zone)
+    }
+  },
+})
+const isActiveZoneLocked = computed(() => !!activeZone.value?.locked)
+const canFocusActiveZone = computed(() => !!activeZone.value)
+const canEditActiveZone = computed(() => isMapReady.value && !!activeZone.value && !isActiveZoneLocked.value)
+const canDeleteActiveZone = computed(() => !!activeZone.value)
+const canFinishEditing = computed(() => currentMode.value === 'direct_select')
 
 const baseZoom = 14
-const zoomBoost = Math.log2(5)
 const mapCenter = [116.3975, 39.9087]
 const route = useRoute()
 
@@ -146,7 +152,6 @@ function bindMap(map) {
   const setupLayers = async () => {
     const hasPeopleSource = !!map.getSource('people')
     if (!hasPeopleSource) {
-      map.setZoom(map.getZoom() + zoomBoost)
       initLayers(map)
     }
     if (!mapInteractionCleanup.length) {
@@ -157,6 +162,16 @@ function bindMap(map) {
     editingZoneId.value = null
     if (drawControl) {
       syncCustomZones()
+    }
+    if (!hasFittedInitialView) {
+      const fitted = fitMapToFactory()
+      if (!fitted) {
+        map.once('idle', () => {
+          if (!hasFittedInitialView) {
+            fitMapToFactory()
+          }
+        })
+      }
     }
     updateLayers()
     await refreshPeopleSource()
@@ -169,7 +184,9 @@ function bindMap(map) {
         focusPersonOnMap(target, { ...options, instant: true })
       }
     } else if (!hasFittedInitialView) {
-      fitMapToPeople()
+      if (!fitMapToFactory()) {
+        fitMapToPeople()
+      }
     }
   }
 
@@ -370,13 +387,41 @@ function initDraw(map) {
     const first = e.features[0]?.id || null
     activeZoneId.value = first
     if (currentMode.value === 'direct_select') {
-      editingZoneId.value = first
+      const zone = zoneById(first)
+      if (zone?.locked) {
+        nextTick(() => {
+          if (!drawControl) return
+          if (first) {
+            drawControl.changeMode('simple_select', { featureIds: [first] })
+          } else {
+            drawControl.changeMode('simple_select')
+          }
+        })
+        editingZoneId.value = null
+      } else {
+        editingZoneId.value = first
+      }
+    } else {
+      editingZoneId.value = null
     }
   }
 
   const handleModeChange = e => {
     currentMode.value = e.mode
     if (e.mode === 'direct_select') {
+      const zone = zoneById(activeZoneId.value)
+      if (zone?.locked) {
+        nextTick(() => {
+          if (!drawControl) return
+          if (activeZoneId.value) {
+            drawControl.changeMode('simple_select', { featureIds: [activeZoneId.value] })
+          } else {
+            drawControl.changeMode('simple_select')
+          }
+        })
+        editingZoneId.value = null
+        return
+      }
       editingZoneId.value = activeZoneId.value
     } else {
       editingZoneId.value = null
@@ -413,6 +458,7 @@ function syncCustomZones() {
       name: f.properties?.name || '未命名区域',
       color: f.properties?.color || '#2563eb',
       geometry: f.geometry,
+      locked: !!f.properties?.locked,
     }))
   customZones.value = mapped
   if (activeZoneId.value && !mapped.some(z => z.id === activeZoneId.value)) {
@@ -421,6 +467,11 @@ function syncCustomZones() {
   if (editingZoneId.value && !mapped.some(z => z.id === editingZoneId.value)) {
     editingZoneId.value = null
   }
+}
+
+function zoneById(id) {
+  if (!id) return null
+  return customZones.value.find(z => z.id === id) || null
 }
 
 function startDrawing() {
@@ -455,6 +506,11 @@ function focusZone(zone) {
 
 function enableEdit(zone) {
   if (!drawControl) return
+  if (zone.locked) {
+    activeZoneId.value = zone.id
+    editingZoneId.value = null
+    return
+  }
   activeZoneId.value = zone.id
   editingZoneId.value = zone.id
   drawControl.changeMode('direct_select', { featureId: zone.id })
@@ -465,13 +521,34 @@ function removeZone(zone) {
   drawControl.delete(zone.id)
 }
 
-function renameZone(zone) {
+function focusActiveZone() {
+  const zone = activeZone.value
+  if (!zone) return
+  focusZone(zone)
+}
+
+function toggleActiveZoneLock() {
   if (!drawControl) return
-  const value = zone.name ? zone.name.trim() : ''
-  const finalName = value || '未命名区域'
-  zone.name = finalName
-  drawControl.setFeatureProperty(zone.id, 'name', finalName)
+  const zone = activeZone.value
+  if (!zone) return
+  const next = !zone.locked
+  drawControl.setFeatureProperty(zone.id, 'locked', next)
+  if (next && editingZoneId.value === zone.id) {
+    finishEditing()
+  }
   syncCustomZones()
+}
+
+function startEditingActiveZone() {
+  const zone = activeZone.value
+  if (!zone || zone.locked) return
+  enableEdit(zone)
+}
+
+function removeActiveZone() {
+  const zone = activeZone.value
+  if (!zone) return
+  removeZone(zone)
 }
 
 function geometryBounds(geometry) {
@@ -513,6 +590,65 @@ function geometryBounds(geometry) {
     [minLng, minLat],
     [maxLng, maxLat],
   ]
+}
+
+function mergeBounds(base, next) {
+  if (!next) return base || null
+  if (!base) return next
+  return [
+    [Math.min(base[0][0], next[0][0]), Math.min(base[0][1], next[0][1])],
+    [Math.max(base[1][0], next[1][0]), Math.max(base[1][1], next[1][1])],
+  ]
+}
+
+function fitMapToFactory() {
+  const map = getMap()
+  if (!map || !map.isStyleLoaded()) return false
+  const source = map.getSource('factory')
+  if (!source) return false
+
+  let geojson = null
+  if (typeof source.serialize === 'function') {
+    const serialized = source.serialize()
+    if (serialized && serialized.data) {
+      geojson = serialized.data
+    }
+  }
+
+  if (!geojson && source._data) {
+    geojson = source._data
+  }
+
+  if (!geojson && source._options && source._options.data) {
+    geojson = source._options.data
+  }
+
+  const features = []
+  if (geojson) {
+    if (geojson.type === 'FeatureCollection' && Array.isArray(geojson.features)) {
+      features.push(...geojson.features)
+    } else if (geojson.type === 'Feature') {
+      features.push(geojson)
+    }
+  }
+
+  if (!features.length) return false
+
+  let bounds = null
+  features.forEach(feature => {
+    const next = geometryBounds(feature?.geometry)
+    bounds = mergeBounds(bounds, next)
+  })
+
+  if (!bounds) return false
+
+  map.fitBounds(bounds, {
+    padding: { top: 80, bottom: 80, left: 80, right: 360 },
+    duration: 0,
+    maxZoom: 18,
+  })
+  hasFittedInitialView = true
+  return true
 }
 
 function cameraFeatures() {
@@ -874,9 +1010,9 @@ function fitMapToPeople(collection) {
       [maxLon, maxLat],
     ],
     {
-      padding: { top: 80, bottom: 80, left: 80, right: 240 },
+      padding: { top: 80, bottom: 80, left: 80, right: 360 },
       duration: 800,
-      maxZoom: 17,
+      maxZoom: 18,
     }
   )
   hasFittedInitialView = true
@@ -1072,54 +1208,31 @@ function formatTime(t) {
       </div>
     </div>
     <div class="map-container">
-      <MapLibreView ref="mapView" :center="mapCenter" :zoom="baseZoom" />
-      <div class="map-overlay">
-        <div class="zone-panel">
-          <div class="zone-panel__header">
-            <div class="zone-panel__title">自定义区域</div>
-            <div class="zone-panel__actions">
-              <button class="zone-btn" @click="startDrawing" :disabled="!canStartDrawing">新增区域</button>
-              <button
-                v-if="isEditingMode"
-                class="zone-btn zone-btn--secondary"
-                @click="finishEditing"
-              >完成编辑</button>
-            </div>
-          </div>
-          <div class="zone-panel__hint">{{ zonePanelHint }}</div>
-          <div class="zone-panel__list">
-            <div v-if="!customZones.length" class="zone-empty">
-              暂无自定义区域，点击“新增区域”开始绘制。
-            </div>
-            <div
-              v-for="zone in customZones"
-              :key="zone.id"
-              :class="['zone-item', { active: zone.id === activeZoneId, editing: zone.id === editingZoneId }]"
-              @click="selectZone(zone)"
-            >
-              <div class="zone-item__row">
-                <span class="zone-color" :style="{ background: zone.color }"></span>
-                <input
-                  class="zone-name"
-                  v-model="zone.name"
-                  @blur="renameZone(zone)"
-                  @keyup.enter.prevent="renameZone(zone)"
-                />
-              </div>
-              <div class="zone-item__actions">
-                <button class="zone-link" @click.stop="focusZone(zone)">定位</button>
-                <button
-                  class="zone-link"
-                  @click.stop="enableEdit(zone)"
-                  :disabled="!isMapReady || isDrawing"
-                >编辑</button>
-                <button class="zone-link danger" @click.stop="removeZone(zone)">删除</button>
-              </div>
-            </div>
-          </div>
+      <div class="map-toolbar">
+        <div class="toolbar-info">
+          <div class="toolbar-title">轨迹分析工具栏</div>
+          <div class="toolbar-subtitle">快速划分、选中、锁定、删除与修改区域</div>
+        </div>
+        <div class="toolbar-actions">
+          <button class="toolbar-btn primary" @click="startDrawing" :disabled="!canStartDrawing">新增区域</button>
+          <select class="toolbar-select" v-model="toolbarSelectedZoneId" :disabled="!customZones.length">
+            <option value="">选择区域</option>
+            <option v-for="zone in customZones" :key="zone.id" :value="String(zone.id)">
+              {{ zone.name }}
+            </option>
+          </select>
+          <button class="toolbar-btn" @click="focusActiveZone" :disabled="!canFocusActiveZone">定位区域</button>
+          <button class="toolbar-btn" @click="toggleActiveZoneLock" :disabled="!canFocusActiveZone">
+            {{ isActiveZoneLocked ? '解锁区域' : '锁定区域' }}
+          </button>
+          <button class="toolbar-btn" @click="startEditingActiveZone" :disabled="!canEditActiveZone">编辑区域</button>
+          <button class="toolbar-btn" @click="finishEditing" :disabled="!canFinishEditing">完成编辑</button>
+          <button class="toolbar-btn danger" @click="removeActiveZone" :disabled="!canDeleteActiveZone">删除区域</button>
         </div>
       </div>
-
+      <div class="map-area">
+        <MapLibreView ref="mapView" :center="mapCenter" :zoom="baseZoom" />
+      </div>
     </div>
   </div>
 </template>
@@ -1210,183 +1323,122 @@ function formatTime(t) {
 }
 
 .map-container {
-  position: relative;
   flex: 1;
-}
-.map-overlay {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  display: flex;
-  justify-content: flex-end;
-  align-items: flex-end;
-  padding: 16px;
-}
-.zone-panel {
-  pointer-events: auto;
-  width: clamp(240px, 24vw, 320px);
-  max-height: calc(100% - 32px);
-  background: rgba(255, 255, 255, 0.95);
-  border: 1px solid #e2e8f0;
-  border-radius: 14px;
-  box-shadow: 0 20px 40px -24px rgba(15, 23, 42, 0.85);
   display: flex;
   flex-direction: column;
-  backdrop-filter: blur(6px);
+  background: #f1f5f9;
 }
-.zone-panel__header {
+.map-toolbar {
   display: flex;
-  justify-content: space-between;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 12px;
-  padding: 16px 16px 8px;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 22px 14px;
+  background: linear-gradient(135deg, rgba(59, 130, 246, 0.12), rgba(14, 165, 233, 0.08));
+  border-bottom: 1px solid rgba(148, 163, 184, 0.35);
+  box-shadow: inset 0 -1px 0 rgba(148, 163, 184, 0.25);
 }
-.zone-panel__title {
-  font-size: 14px;
+.toolbar-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 220px;
+}
+.toolbar-title {
+  font-size: 18px;
   font-weight: 600;
   color: #0f172a;
 }
-.zone-panel__actions {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
+.toolbar-subtitle {
+  font-size: 13px;
+  color: #334155;
 }
-.zone-btn {
-  border: none;
-  border-radius: 999px;
-  padding: 6px 14px;
-  font-size: 12px;
-  cursor: pointer;
-  background: #2563eb;
-  color: #ffffff;
-  transition: background 0.2s ease, opacity 0.2s ease;
-}
-.zone-btn:hover {
-  background: #1d4ed8;
-}
-.zone-btn:disabled {
-  cursor: not-allowed;
-  opacity: 0.45;
-  background: #93c5fd;
-}
-.zone-btn--secondary {
-  background: #0f172a;
-  color: #e0f2fe;
-}
-.zone-btn--secondary:hover {
-  background: #1e293b;
-}
-.zone-panel__hint {
-  padding: 0 16px 12px;
-  font-size: 12px;
-  color: #475569;
-  line-height: 1.5;
-  border-bottom: 1px dashed #e2e8f0;
-}
-.zone-panel__list {
-  padding: 12px 16px 16px;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-.zone-empty {
-  font-size: 12px;
-  color: #94a3b8;
-  text-align: center;
-  padding: 12px;
-  border: 1px dashed #cbd5f5;
-  border-radius: 10px;
-  background: rgba(241, 245, 249, 0.6);
-}
-.zone-item {
-  border: 1px solid #e2e8f0;
-  border-radius: 12px;
-  padding: 12px;
-  background: rgba(255, 255, 255, 0.95);
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  box-shadow: 0 14px 30px -22px rgba(15, 23, 42, 0.9);
-  transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
-}
-.zone-item:hover {
-  transform: translateY(-1px);
-}
-.zone-item.active {
-  border-color: #2563eb;
-  box-shadow: 0 20px 32px -20px rgba(37, 99, 235, 0.55);
-}
-.zone-item.editing {
-  border-color: #f97316;
-  box-shadow: 0 20px 32px -20px rgba(249, 115, 22, 0.55);
-}
-.zone-item__row {
+.toolbar-actions {
   display: flex;
   align-items: center;
-  gap: 10px;
-}
-.zone-color {
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  border: 2px solid #ffffff;
-  box-shadow: 0 0 0 1px rgba(148, 163, 184, 0.4);
-  flex-shrink: 0;
-}
-.zone-name {
-  flex: 1;
-  border: none;
-  background: transparent;
-  font-size: 13px;
-  font-weight: 500;
-  color: #0f172a;
-  padding: 2px 4px;
-  border-radius: 6px;
-  transition: box-shadow 0.2s ease, background 0.2s ease;
-}
-.zone-name:focus {
-  outline: none;
-  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.3);
-  background: rgba(226, 232, 240, 0.35);
-}
-.zone-item__actions {
-  display: flex;
   gap: 12px;
   flex-wrap: wrap;
 }
-.zone-link {
-  border: none;
-  background: none;
-  padding: 0;
-  font-size: 12px;
-  color: #2563eb;
-  cursor: pointer;
-  transition: color 0.2s ease;
+.toolbar-select {
+  min-width: 180px;
+  border-radius: 999px;
+  border: 1px solid rgba(148, 163, 184, 0.6);
+  padding: 6px 14px;
+  font-size: 13px;
+  color: #0f172a;
+  background: rgba(255, 255, 255, 0.9);
+  transition: border 0.2s ease, box-shadow 0.2s ease;
 }
-.zone-link:hover {
-  text-decoration: underline;
+.toolbar-select:focus {
+  outline: none;
+  border-color: #2563eb;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.15);
 }
-.zone-link.danger {
-  color: #dc2626;
-}
-.zone-link:disabled {
-  opacity: 0.4;
+.toolbar-select:disabled {
+  opacity: 0.5;
   cursor: not-allowed;
 }
-
-@media (max-width: 1280px) {
-  .zone-panel {
-    width: clamp(220px, 32vw, 300px);
-  }
+.toolbar-btn {
+  border: none;
+  border-radius: 999px;
+  padding: 6px 16px;
+  font-size: 13px;
+  font-weight: 500;
+  background: rgba(15, 23, 42, 0.08);
+  color: #0f172a;
+  cursor: pointer;
+  transition: background 0.2s ease, transform 0.2s ease, opacity 0.2s ease;
+}
+.toolbar-btn:hover:not(:disabled) {
+  background: rgba(15, 23, 42, 0.16);
+  transform: translateY(-1px);
+}
+.toolbar-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.toolbar-btn.primary {
+  background: #2563eb;
+  color: #ffffff;
+}
+.toolbar-btn.primary:hover:not(:disabled) {
+  background: #1d4ed8;
+}
+.toolbar-btn.danger {
+  background: #ef4444;
+  color: #ffffff;
+}
+.toolbar-btn.danger:hover:not(:disabled) {
+  background: #dc2626;
+}
+.map-area {
+  position: relative;
+  flex: 1;
+  min-height: 0;
 }
 
 @media (max-width: 1024px) {
   .sidebar {
     width: 280px;
   }
-  .zone-panel {
-    width: clamp(200px, 40vw, 280px);
+  .toolbar-info {
+    min-width: 180px;
+  }
+  .toolbar-title {
+    font-size: 16px;
+  }
+}
+
+@media (max-width: 860px) {
+  .toolbar-actions {
+    gap: 8px;
+  }
+  .toolbar-select {
+    min-width: 160px;
+  }
+  .toolbar-btn {
+    padding: 6px 12px;
   }
 }
 

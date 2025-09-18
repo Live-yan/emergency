@@ -82,6 +82,54 @@ function zoneFeaturesFrom(center){
   return { type:'FeatureCollection', features:feats }
 }
 
+function featureCollectionBounds(collection){
+  if (!collection || !Array.isArray(collection.features) || !collection.features.length) {
+    return null
+  }
+  let minLon = Infinity
+  let minLat = Infinity
+  let maxLon = -Infinity
+  let maxLat = -Infinity
+
+  const extend = coords => {
+    if (!Array.isArray(coords)) return
+    if (coords.length >= 2 && typeof coords[0] === 'number' && typeof coords[1] === 'number') {
+      const lon = coords[0]
+      const lat = coords[1]
+      if (Number.isFinite(lon) && Number.isFinite(lat)) {
+        if (lon < minLon) minLon = lon
+        if (lon > maxLon) maxLon = lon
+        if (lat < minLat) minLat = lat
+        if (lat > maxLat) maxLat = lat
+      }
+      return
+    }
+    coords.forEach(extend)
+  }
+
+  collection.features.forEach(feature => {
+    if (!feature || !feature.geometry) return
+    extend(feature.geometry.coordinates)
+  })
+
+  if (!Number.isFinite(minLon) || !Number.isFinite(minLat) || !Number.isFinite(maxLon) || !Number.isFinite(maxLat)) {
+    return null
+  }
+
+  if (minLon === maxLon && minLat === maxLat) {
+    const delta = 0.0005
+    minLon -= delta
+    maxLon += delta
+    minLat -= delta
+    maxLat += delta
+  }
+
+  return [
+    [minLon, minLat],
+    [maxLon, maxLat],
+  ]
+}
+
 async function init(){
   if (!containerRef.value) return
   // 优先尝试本地 pmtiles；否则回退 OSM 在线瓦片
@@ -117,6 +165,14 @@ async function init(){
     map.addLayer({ id:'factory-label', type:'symbol', source:'factory', layout:{
       'text-field':['get','name'], 'text-size':12, 'text-anchor':'center'
     }, paint:{ 'text-color':'#334155', 'text-halo-color':'#ffffff', 'text-halo-width':1 }})
+
+    const bounds = featureCollectionBounds(fc)
+    if (bounds) {
+      map.fitBounds(bounds, {
+        padding: { top: 48, bottom: 48, left: 56, right: 360 },
+        duration: 0,
+      })
+    }
   })
 }
 
